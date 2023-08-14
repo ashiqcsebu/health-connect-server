@@ -2,8 +2,8 @@ const express = require("express");
 const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const jwt = require("jsonwebtoken");
-//const nodemailer = require('nodemailer');
-//const mg = require('nodemailer-mailgun-transport');
+const nodemailer = require("nodemailer");
+const mg = require("nodemailer-mailgun-transport");
 require("dotenv").config();
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
@@ -23,39 +23,42 @@ const client = new MongoClient(uri, {
 });
 
 function sendBookingEmail(booking) {
-    const { email, treatment, appointmentDate, slot } = booking;
+  const { email, treatment, appointmentDate, slot, patient, doctorName } =
+    booking;
 
-    const auth = {
-        auth: {
-          api_key: process.env.EMAIL_SEND_KEY,
-          domain: process.env.EMAIL_SEND_DOMAIN
-        }
+  const auth = {
+    auth: {
+      api_key: process.env.EMAIL_SEND_KEY,
+      domain: process.env.EMAIL_SEND_DOMAIN,
+    },
+  };
+
+  const transporter = nodemailer.createTransport(mg(auth));
+  console.log("sending email", email);
+  transporter.sendMail(
+    {
+      from: "health-connect@gmail.com", // verified sender email
+      to: email || "shafiqul.cse33.bu@gmail.com", // recipient email
+      subject: ` Your appointment at Health Connect has been confirmed.`, // Subject line
+      text: "",
+      html: `
+      <h3>Your appointment is confirmed</h3>
+      <div>
+          <p> Dear ${patient}, Your appointment with Dr. ${doctorName} in the ${treatment} department has been confirmed </p>
+          <p>Please visit us on ${appointmentDate} at ${slot}</p>
+          <p>Thanks from Health Connect.</p>
+      </div>
+      
+      `,
+    },
+    function (error, info) {
+      if (error) {
+        console.log("Email send error", error);
+      } else {
+        console.log(info);
       }
-
-      const transporter = nodemailer.createTransport(mg(auth));
-
-      console.log('sending email', email)
-    transporter.sendMail({
-        from: "ashiq.cse3.bu@gmail.com", // verified sender email
-        to: email || 'ashiq.online01@gmail.com', // recipient email
-        subject: `Your appointment for ${treatment} is confirmed`, // Subject line
-        text: "Hello world!", // plain text body
-        html: `
-        <h3>Your appointment is confirmed</h3>
-        <div>
-            <p>Your appointment for treatment: ${treatment}</p>
-            <p>Please visit us on ${appointmentDate} at ${slot}</p>
-            <p>Thanks from Doctors Portal.</p>
-        </div>
-
-        `, // html body
-    }, function (error, info) {
-        if (error) {
-            console.log('Email send error', error);
-        } else {
-            console.log('Email sent: ' + info);
-        }
-    });
+    }
+  );
 }
 
 function verifyJWT(req, res, next) {
@@ -77,11 +80,17 @@ function verifyJWT(req, res, next) {
 
 async function run() {
   try {
-    const appointmentOptionCollection = client.db("doctorsPortal").collection("appointmentOptions");
-    const bookingsCollection = client.db("doctorsPortal").collection("bookings");
+    const appointmentOptionCollection = client
+      .db("doctorsPortal")
+      .collection("appointmentOptions");
+    const bookingsCollection = client
+      .db("doctorsPortal")
+      .collection("bookings");
     const usersCollection = client.db("doctorsPortal").collection("users");
     const doctorsCollection = client.db("doctorsPortal").collection("doctors");
-    const paymentsCollection = client.db("doctorsPortal").collection("payments");
+    const paymentsCollection = client
+      .db("doctorsPortal")
+      .collection("payments");
 
     // NOTE: make sure you use verifyAdmin after verifyJWT
     const verifyAdmin = async (req, res, next) => {
@@ -122,20 +131,27 @@ async function run() {
     });
 
     app.get("/doctors", async (req, res) => {
-      const { name } = req.query;
-      // Prepare the filter conditions
-      const filter = {};
-
-      if (name) {
-        // Filter by genre
-        filter.name = name;
+      try {
+        const { name } = req.query;
+        //const books = await appointmentOptionCollection.find({name}).toArray();
+        const doctors = await doctorsCollection.find({}).toArray();
+        return res.send(doctors);
+      } catch (error) {
+        console.log(error);
       }
+    });
 
-      const books = await appointmentOptionCollection.find(filter).toArray();
-      return res.status(200).send({
-        message: "Doctors retrieved successfully!",
-        books: books,
-      });
+    app.get("/getDoctorsBySpecialty/:specialty", async (req, res) => {
+      try {
+        const { specialty } = req.params;
+        const matchingDoctors = await doctorsCollection
+          .find({ specialty })
+          .toArray();
+        res.json(matchingDoctors);
+      } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "An error occurred" });
+      }
     });
 
     app.get("/v2/appointmentOptions", async (req, res) => {
@@ -199,13 +215,16 @@ async function run() {
     app.get("/bookings", verifyJWT, async (req, res) => {
       const email = req.query.email;
       const decodedEmail = req.decoded.email;
-
       if (email !== decodedEmail) {
         return res.status(403).send({ message: "forbidden access" });
       }
-
       const query = { email: email };
       const bookings = await bookingsCollection.find(query).toArray();
+      res.send(bookings);
+    });
+
+    app.get("/booking", async (req, res) => {
+      const bookings = await bookingsCollection.find({ paid: true }).toArray();
       res.send(bookings);
     });
 
@@ -218,7 +237,7 @@ async function run() {
 
     app.post("/bookings", async (req, res) => {
       const booking = req.body;
-      console.log(booking);
+
       const query = {
         appointmentDate: booking.appointmentDate,
         email: booking.email,
@@ -234,7 +253,7 @@ async function run() {
 
       const result = await bookingsCollection.insertOne(booking);
       // send email about appointment confirmation
-      // sendBookingEmail(booking)
+      sendBookingEmail(booking);
       res.send(result);
     });
 
@@ -299,10 +318,16 @@ async function run() {
 
     app.post("/users", async (req, res) => {
       const user = req.body;
-      console.log(user);
+      // console.log(user);
       // TODO: make sure you do not enter duplicate user email
       // only insert users if the user doesn't exist in the database
       const result = await usersCollection.insertOne(user);
+      res.send(result);
+    });
+    app.delete("/users/:id", verifyJWT, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const filter = { _id: ObjectId(id) };
+      const result = await usersCollection.deleteOne(filter);
       res.send(result);
     });
 
@@ -336,9 +361,26 @@ async function run() {
     //     res.send(result);
     // })
 
-    app.get("/doctors", verifyJWT, verifyAdmin, async (req, res) => {
+    app.get("/doctors", verifyJWT, async (req, res) => {
       const query = {};
       const doctors = await doctorsCollection.find(query).toArray();
+      res.send(doctors);
+    });
+
+    app.get("/doctor-list", async (req, res) => {
+      const query = {};
+      const doctors = await doctorsCollection
+        .find(query)
+        .sort({ experience: -1 })
+        .limit(3)
+        .toArray();
+      res.send(doctors);
+    });
+
+    app.get("/doctors/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: ObjectId(id) };
+      const doctors = await doctorsCollection.findOne(query);
       res.send(doctors);
     });
 
